@@ -230,16 +230,27 @@ public class Main {
         private void report(){
             double porcentageCurrentProgress = (currentProgress * 100.0) / total;
             double estimatedTimeAproximation =  (100.0-porcentageCurrentProgress) / porcentagePerSecond();
-            Duration duration = Duration.ofSeconds((long)(estimatedTimeAproximation));
-            printStream.println("Current progress: " + (currentProgress * 100) / total + "% " + currentProgress + " B /" + total + " B ETA: " + duration.toString());
+            Duration duration = Duration.ofSeconds(Math.round(estimatedTimeAproximation));
+            printStream.println("Current progress: " + (currentProgress * 100) / total + "% " + currentProgress + " B /" + total + " B ETA: " + formatDuration(duration));
         }
 
         private double porcentagePerSecond(){
             Instant currentTimestamp = Instant.now();
             double deltaProgress = (currentProgress  - lastProgress) * 100.0 / total;
-            double deltaTime = lastTimestamp.until(Instant.now(), SECONDS);
+            double deltaTime = lastTimestamp.until(currentTimestamp, SECONDS);
             lastTimestamp = currentTimestamp;
             return deltaProgress / deltaTime;
+        }
+
+        private String formatDuration(Duration duration) {
+            long seconds = duration.getSeconds();
+            long absSeconds = Math.abs(seconds);
+            String positive = String.format(
+                    "%d:%02d:%02d",
+                    absSeconds / 3600,
+                    (absSeconds % 3600) / 60,
+                    absSeconds % 60);
+            return seconds < 0 ? "-" + positive : positive;
         }
     }
 }
