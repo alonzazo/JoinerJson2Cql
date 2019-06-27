@@ -1,42 +1,40 @@
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.Session;
+import com.datastax.driver.core.*;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.InputStream;
-import java.io.PrintStream;
+import java.io.*;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HashSet;
-import java.util.Scanner;
-import java.util.Set;
+import java.util.*;
 
 import static java.time.temporal.ChronoUnit.SECONDS;
 
+enum Condition { RIGHT_INNER_JOIN, LEFT_INNER_JOIN, FULL_OUTER_JOIN }
 
-public class Main {
+public class MainHash {
 
 
     public static void main(String[] args){
         Cluster cluster = null;
         Condition condition = null;
         try {
-            String tablename;
+            String tableToName;
             String path1;
-            String path2;
+            String table2Name;
+            String partitionKey;
 
             if (args.length == 2){
-                tablename = "reviewsJoined";
+                tableToName = "reviewsJoined";
                 path1 = args[0];
-                path2 = args[1];
+                table2Name = args[1];
+                partitionKey = "asin";
             }
             else if (args.length == 3){
-                tablename = "reviewsJoined";
+                tableToName = "reviewsJoined";
                 path1 = args[0];
-                path2 = args[1];
+                table2Name = args[1];
+                partitionKey = "asin";
 
                 if (args[2].equals("--OUTER")){
                     condition = Condition.FULL_OUTER_JOIN;
@@ -48,13 +46,14 @@ public class Main {
                     condition = Condition.RIGHT_INNER_JOIN;
                 }
                 else {
-                    tablename = args[2];
+                    tableToName = args[2];
                 }
             }
             else if (args.length == 4){
                 path1 = args[0];
-                path2 = args[1];
-                tablename = args[2];
+                table2Name = args[1];
+                tableToName = args[2];
+                partitionKey = "asin";
 
                 if (args[3].equals("--OUTER")){
                     condition = Condition.FULL_OUTER_JOIN;
@@ -64,6 +63,28 @@ public class Main {
                 }
                 else if (args[3].equals("--RIGHT")){
                     condition = Condition.RIGHT_INNER_JOIN;
+                }
+                else {
+                    tableToName = args[3];
+                }
+            }
+            else if (args.length == 5) {
+                path1 = args[0];
+                table2Name = args[1];
+                partitionKey = args[2];
+                tableToName = args[3];
+
+                if (args[4].equals("--OUTER")){
+                    condition = Condition.FULL_OUTER_JOIN;
+                }
+                else if (args[4].equals("--LEFT")){
+                    condition = Condition.LEFT_INNER_JOIN;
+                }
+                else if (args[4].equals("--RIGHT")){
+                    condition = Condition.RIGHT_INNER_JOIN;
+                }
+                else {
+                    tableToName = args[4];
                 }
             }
             else
@@ -77,7 +98,7 @@ public class Main {
             Scanner scanner1 = new Scanner(inputStream1);
 
             cluster = Cluster.builder()                                                    // (1)
-                    //.addContactPoint("54.167.192.105")
+                    //.addContactPoint("3.92.232.169")
                     .addContactPoint("localhost")
                     .build();
             Session session = cluster.connect("scyllaproject");                                           // (2)
@@ -86,17 +107,34 @@ public class Main {
             progressCounter.start();
 
             boolean leftHasBeenInsertedAtLeastOne = false;
-            Set<JSONObject> rightHaveNotBeenAssigned = new HashSet<JSONObject>();
+            Set<String> rightHaveNotBeenAssigned = new HashSet<String>();
 
+            int i = 0;
             while (scanner1.hasNextLine()){
 
                 String lineLeft = scanner1.nextLine();
 
                 JSONObject rowLeft = (JSONObject) jsonParser.parse(lineLeft);
 
-                JSONObject newJSON;
+                ResultSet rs = session.execute("SELECT JSON year,reviewerID, asin, toUnixTimestamp(unixReviewTime), helpful, overall, reviewerName, reviewText, reviewTime, summary FROM " + table2Name + " WHERE " + partitionKey + " = '" + rowLeft.get(partitionKey).toString() + "'");
+                for (Row row : rs) {
+                    JSONObject newJSON = (JSONObject) jsonParser.parse(row.getString(0));
 
-                InputStream inputStream2 = new FileInputStream(path2);
+                    newJSON = Joiner.join(rowLeft, newJSON);
+
+                    String query = convertJsonToQuery(newJSON, tableToName);
+
+                    //session.execute(query);
+
+                    leftHasBeenInsertedAtLeastOne = true;
+                    rightHaveNotBeenAssigned.add(newJSON.get(partitionKey).toString());
+                }
+
+                if (i == 2)
+                    break;
+
+                i++;
+                /*InputStream inputStream2 = new FileInputStream(path2);
 
                 Scanner scanner2 = new Scanner(inputStream2);
 
@@ -121,28 +159,39 @@ public class Main {
                         rightHaveNotBeenAssigned.remove(rowRight);
 
                     }
-                }
+                }*/
 
                 if (!leftHasBeenInsertedAtLeastOne && (condition == Condition.LEFT_INNER_JOIN || condition == Condition.FULL_OUTER_JOIN))
                 {
                     //Insertamos el dato de la izquierda con derecha en nulo
-                    String query = convertJsonToQuery(rowLeft, tablename);
+                    String query = convertJsonToQuery(rowLeft, tableToName);
 
                     session.execute(query);
                 }
 
-                scanner2.close();
+               // scanner2.close();
 
                 progressCounter.advance(lineLeft.length());
 
             }
 
             if (!rightHaveNotBeenAssigned.isEmpty() && (condition == Condition.RIGHT_INNER_JOIN || condition == Condition.FULL_OUTER_JOIN)){
-                for (JSONObject rightElement: rightHaveNotBeenAssigned){
-                    //Insertamos el dato de la derecha con izquierda en nulo
-                    String query = convertJsonToQuery(rightElement, tablename);
+                String query = "SELECT JSON year,reviewerID, asin, toUnixTimestamp(unixReviewTime), helpful, overall, reviewerName, reviewText, reviewTime, summary FROM " + table2Name + " WHERE ";
 
-                    session.execute(query);
+                for (String rightKeyElement: rightHaveNotBeenAssigned){
+                    query += partitionKey + " != '" + rightKeyElement + "' AND ";
+                }
+                query = query.substring(0, query.length() - 4) + ";";
+
+                //Insertamos el dato de la derecha con izquierda en nulo
+
+                ResultSet rs = session.execute(query);
+                for (Row row : rs){
+                    JSONObject newJSON = (JSONObject) jsonParser.parse(row.getString(0));
+
+                    String queryNew = convertJsonToQuery(newJSON, tableToName);
+
+                    session.execute(queryNew);
                 }
             }
 
@@ -159,10 +208,13 @@ public class Main {
     }
 
     private static String convertJsonToQuery(JSONObject jsonObject, String tableName){
-        String reviewTime = jsonObject.get("reviewTime").toString();
+        String reviewTime = jsonObject.get("reviewtime").toString();
         String year = reviewTime.substring(reviewTime.length()-4);
 
         jsonObject.put("year", year);
+
+        jsonObject.put("unixreviewtime", jsonObject.get("tounixtimestamp(unixreviewtime)"));
+        jsonObject.remove("tounixtimestamp(unixreviewtime)");
 
         jsonObject.put("related","");
 
